@@ -1,0 +1,15 @@
+# Build artifacts
+*.exe
+*.pdb
+*.res
+*.obj
+*.o
+
+# Visual Studio / Compiler cache
+.vs/
+*.sln
+*.vcxproj*
+
+# Local cache & logs
+covers_cache.json
+*.log
