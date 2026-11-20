@@ -156,11 +156,18 @@ static void sanitize_from_filename(const wchar_t* filename_base, wchar_t* out_ti
 
     const wchar_t* junk_patterns[] = {
         L"yt1s.com - ", L"yt1s.com ",
+        L"y2mate.com - ", L"y2mate.is - ",
+        L"snapsave.io - ", L"ssstik.io_",
+        L" (SPOTISAVER)", L" [SPOTISAVER]",
+        L" [NCS Release]", L" (NCS Release)",
+        L" (320kbps)", L" [320kbps]",
         L" [Official Audio]", L" [Official Music Video]",
         L" (Official Audio)", L" (Official Music Video)",
         L" [Official Video]", L" (Official Video)",
+        L" (Official)", L" [Official]",
         L" (Lyrics)", L" [Lyrics]",
         L" (Lyric Video)", L" [Lyric Video]",
+        L" (Audio)", L" [Audio]",
         NULL
     };
 
