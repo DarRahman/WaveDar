@@ -45,7 +45,7 @@ static volatile bool g_repeat_single = false;
 static volatile bool g_is_shuffle = false;
 static volatile bool g_track_finished = false;
 static volatile bool g_loop_restarted = false;
-static volatile float g_volume = 0.8f;
+static volatile float g_volume = 0.15f;
 
 static bool g_discord_enabled = true;
 static HANDLE g_discord_pipe = INVALID_HANDLE_VALUE;
@@ -58,10 +58,24 @@ static CRITICAL_SECTION g_cover_cs;
 
 static void clean_quotes_w(wchar_t* str) {
     if (!str || !*str) return;
+    // Trim leading whitespace
+    while (*str == L' ' || *str == L'\t' || *str == L'\r' || *str == L'\n') {
+        memmove(str, str + 1, (wcslen(str) + 1) * sizeof(wchar_t));
+    }
+    // Trim trailing whitespace
     size_t len = wcslen(str);
-    if (len >= 2 && str[0] == L'\"' && str[len - 1] == L'\"') {
-        memmove(str, str + 1, (len - 2) * sizeof(wchar_t));
+    while (len > 0 && (str[len - 1] == L' ' || str[len - 1] == L'\t' || str[len - 1] == L'\r' || str[len - 1] == L'\n')) {
+        str[--len] = L'\0';
+    }
+    // Strip surrounding quotes
+    if (len >= 2 && ((str[0] == L'\"' && str[len - 1] == L'\"') || (str[0] == L'\'' && str[len - 1] == L'\''))) {
+        memmove(str, str + 1, (len - 1) * sizeof(wchar_t));
         str[len - 2] = L'\0';
+        len -= 2;
+    }
+    // Strip trailing slash
+    while (len > 0 && (str[len - 1] == L'\\' || str[len - 1] == L'/')) {
+        str[--len] = L'\0';
     }
 }
 
@@ -379,6 +393,7 @@ static bool load_directory(const wchar_t* dir_path) {
     wchar_t clean_dir[MAX_PATH_LEN];
     wcsncpy(clean_dir, dir_path, MAX_PATH_LEN - 1);
     clean_dir[MAX_PATH_LEN - 1] = L'\0';
+    clean_quotes_w(clean_dir);
     size_t dlen = wcslen(clean_dir);
     while (dlen > 0 && (clean_dir[dlen - 1] == L'\\' || clean_dir[dlen - 1] == L'/')) {
         clean_dir[--dlen] = L'\0';
