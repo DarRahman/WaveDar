@@ -58,22 +58,22 @@ static CRITICAL_SECTION g_cover_cs;
 
 static void clean_quotes_w(wchar_t* str) {
     if (!str || !*str) return;
-    // Trim leading whitespace
     while (*str == L' ' || *str == L'\t' || *str == L'\r' || *str == L'\n') {
         memmove(str, str + 1, (wcslen(str) + 1) * sizeof(wchar_t));
     }
-    // Trim trailing whitespace
     size_t len = wcslen(str);
     while (len > 0 && (str[len - 1] == L' ' || str[len - 1] == L'\t' || str[len - 1] == L'\r' || str[len - 1] == L'\n')) {
         str[--len] = L'\0';
     }
-    // Strip surrounding quotes
     if (len >= 2 && ((str[0] == L'\"' && str[len - 1] == L'\"') || (str[0] == L'\'' && str[len - 1] == L'\''))) {
         memmove(str, str + 1, (len - 1) * sizeof(wchar_t));
         str[len - 2] = L'\0';
         len -= 2;
     }
-    // Strip trailing slash
+    while (len >= 3 && str[0] == L'\\' && iswalpha(str[1]) && str[2] == L':') {
+        memmove(str, str + 1, len * sizeof(wchar_t));
+        len--;
+    }
     while (len > 0 && (str[len - 1] == L'\\' || str[len - 1] == L'/')) {
         str[--len] = L'\0';
     }
@@ -527,7 +527,8 @@ int main(int argc, char** argv) {
         wprintf(L"=================================================================================\n");
         wprintf(L"                            Welcome to WaveDar Player                            \n");
         wprintf(L"=================================================================================\n\n");
-        wprintf(L"Please drop a music folder here, or paste folder path and press Enter:\n> ");
+        wprintf(L"Please drop a music folder here, or paste folder path and press Enter:\n");
+        wprintf(L"(Or just press Enter to use default Music library)\n> ");
 
         cursor_info.bVisible = TRUE;
         SetConsoleCursorInfo(hOut, &cursor_info);
@@ -538,6 +539,13 @@ int main(int argc, char** argv) {
                 initial_dir[--len] = L'\0';
             }
             clean_quotes_w(initial_dir);
+        }
+
+        if (initial_dir[0] == L'\0') {
+            const wchar_t* profile = _wgetenv(L"USERPROFILE");
+            if (profile) {
+                _snwprintf(initial_dir, MAX_PATH_LEN, L"%s\\Music", profile);
+            }
         }
 
         cursor_info.bVisible = FALSE;
@@ -561,7 +569,7 @@ int main(int argc, char** argv) {
     RegisterHotKey(NULL, 3, 0, VK_MEDIA_PREV_TRACK);
     RegisterHotKey(NULL, 4, 0, VK_MEDIA_STOP);
 
-    wprintf(L"\x1b[2J\x1b[H"); // Clear screen
+    wprintf(L"\x1b[2J\x1b[H");
     draw_shortcuts_box();
 
     play_track(0);
@@ -594,7 +602,7 @@ int main(int argc, char** argv) {
             int ch = _getch();
             if (ch == 0 || ch == 0xE0) {
                 int arrow = _getch();
-                if (arrow == 75) { // Left arrow (-5s)
+                if (arrow == 75) {
                     if (g_decoder_init) {
                         EnterCriticalSection(&g_audio_cs);
                         ma_uint64 cur_pcm = 0;
@@ -606,7 +614,7 @@ int main(int argc, char** argv) {
                         int cur = 0, tot = 0; get_current_track_time(&cur, &tot);
                         discord_update_presence(&g_playlist[g_current_index], cur, tot, g_is_paused);
                     }
-                } else if (arrow == 77) { // Right arrow (+5s)
+                } else if (arrow == 77) {
                     if (g_decoder_init) {
                         EnterCriticalSection(&g_audio_cs);
                         ma_uint64 cur_pcm = 0, len_pcm = 0;
@@ -619,10 +627,10 @@ int main(int argc, char** argv) {
                         int cur = 0, tot = 0; get_current_track_time(&cur, &tot);
                         discord_update_presence(&g_playlist[g_current_index], cur, tot, g_is_paused);
                     }
-                } else if (arrow == 72) { // Up arrow (Vol +)
+                } else if (arrow == 72) {
                     g_volume = (g_volume + 0.05f > 1.0f) ? 1.0f : g_volume + 0.05f;
                     if (g_device_init) ma_device_set_master_volume(&g_device, g_volume);
-                } else if (arrow == 80) { // Down arrow (Vol -)
+                } else if (arrow == 80) {
                     g_volume = (g_volume - 0.05f < 0.0f) ? 0.0f : g_volume - 0.05f;
                     if (g_device_init) ma_device_set_master_volume(&g_device, g_volume);
                 }
@@ -648,7 +656,6 @@ int main(int argc, char** argv) {
             } else if (ch == 's' || ch == 'S') {
                 apply_shuffle(!g_is_shuffle);
             } else if (ch == 'o' || ch == 'O') {
-                // Runtime Open Folder
                 COORD prompt_coord = { 0, 7 };
                 SetConsoleCursorPosition(hOut, prompt_coord);
                 wprintf(L"\x1b[2K[Open Folder] Drop folder or paste path (Esc to cancel):\n> \x1b[2K");
@@ -662,7 +669,7 @@ int main(int argc, char** argv) {
 
                 while (true) {
                     wint_t wc = _getwch();
-                    if (wc == 27) { // ESC
+                    if (wc == 27) {
                         cancelled = true;
                         break;
                     } else if (wc == L'\r' || wc == L'\n') {
@@ -684,7 +691,6 @@ int main(int argc, char** argv) {
 
                 clean_quotes_w(new_dir);
 
-                // Clear prompt lines
                 SetConsoleCursorPosition(hOut, (COORD){0, 7});
                 wprintf(L"\x1b[2K\n\x1b[2K");
 

@@ -57,7 +57,6 @@ static void cache_insert(const wchar_t* title, const wchar_t* artist, const char
     if (g_cache_count < CACHE_SIZE) {
         idx = g_cache_count++;
     } else {
-        // Simple FIFO replacement
         memmove(&g_cache[0], &g_cache[1], sizeof(CacheEntry) * (CACHE_SIZE - 1));
         idx = CACHE_SIZE - 1;
     }
@@ -77,7 +76,6 @@ static void url_encode_w(const wchar_t* src, wchar_t* dst, size_t dst_max) {
         } else if (ch == L' ') {
             dst[di++] = L'+';
         } else {
-            // Encode non-alphanumeric as hex
             int high = (ch >> 4) & 0x0F;
             int low = ch & 0x0F;
             dst[di++] = L'%';
@@ -109,7 +107,6 @@ static DWORD WINAPI cover_worker_thread(LPVOID arg) {
                                      WINHTTP_NO_PROXY_NAME,
                                      WINHTTP_NO_PROXY_BYPASS, 0);
     if (hSession) {
-        // Set short connection & send timeouts (3 seconds) to prevent hanging
         WinHttpSetTimeouts(hSession, 3000, 3000, 3000, 3000);
 
         HINTERNET hConnect = WinHttpConnect(hSession, L"itunes.apple.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
@@ -128,7 +125,6 @@ static DWORD WINAPI cover_worker_thread(LPVOID arg) {
                     if (WinHttpReadData(hRequest, json_buf, sizeof(json_buf) - 1, &bytes_read) && bytes_read > 0) {
                         json_buf[bytes_read] = '\0';
 
-                        // Extract artworkUrl100
                         const char* art_key = "\"artworkUrl100\":\"";
                         char* art_pos = strstr(json_buf, art_key);
                         if (art_pos) {
@@ -140,7 +136,6 @@ static DWORD WINAPI cover_worker_thread(LPVOID arg) {
                                     strncpy(resolved_url, art_pos, ulen);
                                     resolved_url[ulen] = '\0';
 
-                                    // Upgrade resolution to 512x512 HD
                                     char* res_pos = strstr(resolved_url, "100x100bb.jpg");
                                     if (res_pos) {
                                         memcpy(res_pos, "512x512bb.jpg", 13);
@@ -149,7 +144,6 @@ static DWORD WINAPI cover_worker_thread(LPVOID arg) {
                             }
                         }
 
-                        // Extract collectionName (Album)
                         const char* col_key = "\"collectionName\":\"";
                         char* col_pos = strstr(json_buf, col_key);
                         if (col_pos) {
@@ -203,7 +197,7 @@ void net_cover_resolve_async(const wchar_t* title, const wchar_t* artist, cover_
 
     HANDLE hThread = CreateThread(NULL, 0, cover_worker_thread, p, 0, NULL);
     if (hThread) {
-        CloseHandle(hThread); // Detached execution
+        CloseHandle(hThread);
     } else {
         free(p);
     }

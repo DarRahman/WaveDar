@@ -98,7 +98,6 @@ static bool parse_id3v2_tag(const wchar_t* path, wchar_t* out_title, wchar_t* ou
 
         if (dest_buf && payload_len > 0) {
             if (encoding == 1 || encoding == 2) {
-                // UTF-16 with BOM or big-endian
                 size_t wchars = payload_len / sizeof(wchar_t);
                 if (wchars >= MAX_TITLE_LEN) wchars = MAX_TITLE_LEN - 1;
                 wcsncpy(dest_buf, (const wchar_t*)payload, wchars);
@@ -106,7 +105,6 @@ static bool parse_id3v2_tag(const wchar_t* path, wchar_t* out_title, wchar_t* ou
                 trim_wstr(dest_buf);
                 *dest_found = (wcslen(dest_buf) > 0);
             } else if (encoding == 3) {
-                // UTF-8
                 int cch = MultiByteToWideChar(CP_UTF8, 0, (const char*)payload, (int)payload_len, dest_buf, MAX_TITLE_LEN - 1);
                 if (cch > 0) {
                     dest_buf[cch] = L'\0';
@@ -114,7 +112,6 @@ static bool parse_id3v2_tag(const wchar_t* path, wchar_t* out_title, wchar_t* ou
                     *dest_found = (wcslen(dest_buf) > 0);
                 }
             } else {
-                // ISO-8859-1 / ASCII
                 int cch = MultiByteToWideChar(CP_ACP, 0, (const char*)payload, (int)payload_len, dest_buf, MAX_TITLE_LEN - 1);
                 if (cch > 0) {
                     dest_buf[cch] = L'\0';
@@ -137,7 +134,6 @@ static void sanitize_from_filename(const wchar_t* filename_base, wchar_t* out_ti
     wcsncpy(temp, filename_base, (sizeof(temp) / sizeof(wchar_t)) - 1);
     temp[(sizeof(temp) / sizeof(wchar_t)) - 1] = L'\0';
 
-    // Strip trailing file extension
     wchar_t* dot = wcsrchr(temp, L'.');
     if (dot && (_wcsicmp(dot, L".mp3") == 0 || _wcsicmp(dot, L".wav") == 0 ||
                 _wcsicmp(dot, L".flac") == 0 || _wcsicmp(dot, L".ogg") == 0 ||
@@ -145,7 +141,6 @@ static void sanitize_from_filename(const wchar_t* filename_base, wchar_t* out_ti
         *dot = L'\0';
     }
 
-    // Strip leading track numbers like "01. ", "01 - ", "[1] "
     wchar_t* p = temp;
     while (*p && (iswdigit(*p) || *p == L' ' || *p == L'.' || *p == L'-' || *p == L'[' || *p == L']')) {
         if (*p == L'.' || *p == L'-' || *p == L']') {
@@ -159,7 +154,6 @@ static void sanitize_from_filename(const wchar_t* filename_base, wchar_t* out_ti
         memmove(temp, p, (wcslen(p) + 1) * sizeof(wchar_t));
     }
 
-    // Remove YouTube converter prefixes/suffixes
     const wchar_t* junk_patterns[] = {
         L"yt1s.com - ", L"yt1s.com ",
         L" [Official Audio]", L" [Official Music Video]",
@@ -178,7 +172,6 @@ static void sanitize_from_filename(const wchar_t* filename_base, wchar_t* out_ti
         }
     }
 
-    // Split on " - " into Artist and Title
     wchar_t* sep = wcsstr(temp, L" - ");
     if (sep) {
         *sep = L'\0';
@@ -203,13 +196,11 @@ void extract_track_metadata(const wchar_t* file_path, const wchar_t* filename_ba
 
     memset(out_meta, 0, sizeof(TrackMetadata));
 
-    // Priority 1: ID3v2 Tags
     if (file_path && parse_id3v2_tag(file_path, out_meta->title, out_meta->artist)) {
         out_meta->has_tags = true;
         return;
     }
 
-    // Priority 2: Sanitized filename
     sanitize_from_filename(filename_base, out_meta->title, out_meta->artist);
     out_meta->has_tags = false;
 }
