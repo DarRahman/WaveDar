@@ -12,6 +12,7 @@
 #include <time.h>
 #include <conio.h>
 
+#include "../include/stb_vorbis.c"
 #define MINIAUDIO_IMPLEMENTATION
 #include "../include/miniaudio.h"
 #include "metadata.h"
@@ -326,24 +327,38 @@ static void on_cover_resolved(const wchar_t* title, const char* cover_url, const
 static bool play_track(int index) {
     if (index < 0 || index >= g_playlist_count) return false;
 
-    if (g_device_init) {
-        ma_device_stop(&g_device);
-    }
+    int attempts = 0;
+    int cur_idx = index;
 
-    EnterCriticalSection(&g_audio_cs);
-    if (g_decoder_init) {
-        ma_decoder_uninit(&g_decoder);
-        g_decoder_init = false;
-    }
+    while (attempts < g_playlist_count) {
+        if (g_device_init) {
+            ma_device_stop(&g_device);
+        }
 
-    ma_decoder_config decoderConfig = ma_decoder_config_init(ma_format_f32, 2, 44100);
-    ma_result result = ma_decoder_init_file_w(g_playlist[index].full_path, &decoderConfig, &g_decoder);
-    if (result != MA_SUCCESS) {
+        EnterCriticalSection(&g_audio_cs);
+        if (g_decoder_init) {
+            ma_decoder_uninit(&g_decoder);
+            g_decoder_init = false;
+        }
+
+        ma_decoder_config decoderConfig = ma_decoder_config_init(ma_format_f32, 2, 44100);
+        ma_result result = ma_decoder_init_file_w(g_playlist[cur_idx].full_path, &decoderConfig, &g_decoder);
+        if (result == MA_SUCCESS) {
+            g_decoder_init = true;
+            LeaveCriticalSection(&g_audio_cs);
+            break;
+        }
         LeaveCriticalSection(&g_audio_cs);
+
+        attempts++;
+        cur_idx = (cur_idx + 1) % g_playlist_count;
+    }
+
+    if (attempts >= g_playlist_count) {
         return false;
     }
-    g_decoder_init = true;
-    LeaveCriticalSection(&g_audio_cs);
+
+    index = cur_idx;
 
     if (!g_device_init) {
         ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
