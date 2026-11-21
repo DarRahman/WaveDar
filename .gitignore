@@ -13,3 +13,5 @@
 # Local cache & logs
 covers_cache.json
 *.log
+
+*.zip
