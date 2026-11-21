@@ -57,6 +57,76 @@ static char g_current_cover_url[MAX_URL_LEN] = "app_logo";
 static char g_current_album_name[MAX_ALBUM_LEN] = "WaveDar";
 static CRITICAL_SECTION g_cover_cs;
 
+static int g_current_track_total_sec = 0;
+static wchar_t g_current_loaded_dir[MAX_PATH_LEN] = {0};
+
+static void get_state_file_path(wchar_t* out_path, size_t max_len) {
+    const wchar_t* appdata = _wgetenv(L"APPDATA");
+    if (appdata && appdata[0] != L'\0') {
+        wchar_t dir[MAX_PATH_LEN];
+        _snwprintf(dir, MAX_PATH_LEN, L"%s\\WaveDar", appdata);
+        CreateDirectoryW(dir, NULL);
+        _snwprintf(out_path, max_len, L"%s\\state.ini", dir);
+    } else {
+        _snwprintf(out_path, max_len, L"wavedar_state.ini");
+    }
+}
+
+static void save_state(const wchar_t* dir, int track_idx, float vol, bool repeat, bool shuffle) {
+    if (!dir || dir[0] == L'\0') return;
+    wchar_t state_path[MAX_PATH_LEN];
+    get_state_file_path(state_path, MAX_PATH_LEN);
+
+    FILE* f = _wfopen(state_path, L"w, ccs=UTF-8");
+    if (f) {
+        fwprintf(f, L"[WaveDar]\n");
+        fwprintf(f, L"dir=%s\n", dir);
+        fwprintf(f, L"track=%d\n", track_idx);
+        fwprintf(f, L"volume=%.2f\n", vol);
+        fwprintf(f, L"repeat=%d\n", repeat ? 1 : 0);
+        fwprintf(f, L"shuffle=%d\n", shuffle ? 1 : 0);
+        fclose(f);
+    }
+}
+
+static BOOL WINAPI console_ctrl_handler(DWORD ctrlType) {
+    (void)ctrlType;
+    save_state(g_current_loaded_dir, g_current_index, g_volume, g_repeat_single, g_is_shuffle);
+    return FALSE;
+}
+
+static bool load_state(wchar_t* out_dir, int* out_track, float* out_vol, bool* out_repeat, bool* out_shuffle) {
+    wchar_t state_path[MAX_PATH_LEN];
+    get_state_file_path(state_path, MAX_PATH_LEN);
+
+    FILE* f = _wfopen(state_path, L"r, ccs=UTF-8");
+    if (!f) return false;
+
+    wchar_t line[MAX_PATH_LEN];
+    bool has_dir = false;
+    while (fgetws(line, MAX_PATH_LEN, f)) {
+        size_t len = wcslen(line);
+        while (len > 0 && (line[len - 1] == L'\n' || line[len - 1] == L'\r')) {
+            line[--len] = L'\0';
+        }
+        if (wcsncmp(line, L"dir=", 4) == 0) {
+            wcsncpy(out_dir, line + 4, MAX_PATH_LEN - 1);
+            out_dir[MAX_PATH_LEN - 1] = L'\0';
+            if (out_dir[0] != L'\0') has_dir = true;
+        } else if (wcsncmp(line, L"track=", 6) == 0) {
+            if (out_track) *out_track = _wtoi(line + 6);
+        } else if (wcsncmp(line, L"volume=", 7) == 0) {
+            if (out_vol) *out_vol = (float)_wtof(line + 7);
+        } else if (wcsncmp(line, L"repeat=", 7) == 0) {
+            if (out_repeat) *out_repeat = (_wtoi(line + 7) != 0);
+        } else if (wcsncmp(line, L"shuffle=", 8) == 0) {
+            if (out_shuffle) *out_shuffle = (_wtoi(line + 8) != 0);
+        }
+    }
+    fclose(f);
+    return has_dir;
+}
+
 static void clean_quotes_w(wchar_t* str) {
     if (!str || !*str) return;
     while (*str == L' ' || *str == L'\t' || *str == L'\r' || *str == L'\n') {
@@ -136,15 +206,13 @@ static int get_cjk_string_width(const wchar_t* str) {
 }
 
 static void get_current_track_time(int* p_cur, int* p_tot) {
-    int cur_sec = 0, tot_sec = 0;
+    int cur_sec = 0, tot_sec = g_current_track_total_sec;
     if (g_decoder_init) {
-        ma_uint64 cursorFrames = 0, totalFrames = 0;
+        ma_uint64 cursorFrames = 0;
         EnterCriticalSection(&g_audio_cs);
         ma_decoder_get_cursor_in_pcm_frames(&g_decoder, &cursorFrames);
-        ma_decoder_get_length_in_pcm_frames(&g_decoder, &totalFrames);
         if (g_decoder.outputSampleRate > 0) {
             cur_sec = (int)(cursorFrames / g_decoder.outputSampleRate);
-            tot_sec = (int)(totalFrames / g_decoder.outputSampleRate);
         }
         LeaveCriticalSection(&g_audio_cs);
     }
@@ -384,11 +452,36 @@ static bool play_track(int index) {
     g_is_paused = false;
     g_track_finished = false;
 
+    ma_uint64 totalFrames = 0;
+    ma_decoder_get_length_in_pcm_frames(&g_decoder, &totalFrames);
+    if (g_decoder.outputSampleRate > 0 && totalFrames > 0) {
+        g_current_track_total_sec = (int)(totalFrames / g_decoder.outputSampleRate);
+    } else {
+        g_current_track_total_sec = 0;
+        const wchar_t* ext = wcsrchr(g_playlist[index].full_path, L'.');
+        if (ext && _wcsicmp(ext, L".ogg") == 0) {
+            char u8path[MAX_PATH_LEN];
+            WideCharToMultiByte(CP_UTF8, 0, g_playlist[index].full_path, -1, u8path, sizeof(u8path), NULL, NULL);
+            int err = 0;
+            stb_vorbis* v = stb_vorbis_open_filename(u8path, &err, NULL);
+            if (v) {
+                unsigned int samps = stb_vorbis_stream_length_in_samples(v);
+                stb_vorbis_info nfo = stb_vorbis_get_info(v);
+                if (nfo.sample_rate > 0) {
+                    g_current_track_total_sec = (int)(samps / nfo.sample_rate);
+                }
+                stb_vorbis_close(v);
+            }
+        }
+    }
+
     EnterCriticalSection(&g_cover_cs);
-    strncpy(g_current_cover_url, "app_logo", sizeof(g_current_cover_url) - 1);
-    g_current_cover_url[sizeof(g_current_cover_url) - 1] = '\0';
-    strncpy(g_current_album_name, "WaveDar", sizeof(g_current_album_name) - 1);
-    g_current_album_name[sizeof(g_current_album_name) - 1] = '\0';
+    if (!net_cover_lookup(g_playlist[index].meta.title, g_playlist[index].meta.artist, g_current_cover_url, g_current_album_name)) {
+        strncpy(g_current_cover_url, "app_logo", sizeof(g_current_cover_url) - 1);
+        g_current_cover_url[sizeof(g_current_cover_url) - 1] = '\0';
+        strncpy(g_current_album_name, "WaveDar", sizeof(g_current_album_name) - 1);
+        g_current_album_name[sizeof(g_current_album_name) - 1] = '\0';
+    }
     LeaveCriticalSection(&g_cover_cs);
 
     int cur = 0, tot = 0;
@@ -397,7 +490,20 @@ static bool play_track(int index) {
 
     if (g_discord_enabled) {
         net_cover_resolve_async(g_playlist[index].meta.title, g_playlist[index].meta.artist, on_cover_resolved);
+
+        if (g_playlist_count > 1) {
+            int next_track_idx = 0;
+            if (g_is_shuffle) {
+                int next_shuf = (g_shuffle_index + 1) % g_playlist_count;
+                next_track_idx = g_shuffle_order[next_shuf];
+            } else {
+                next_track_idx = (index + 1) % g_playlist_count;
+            }
+            net_cover_resolve_async(g_playlist[next_track_idx].meta.title, g_playlist[next_track_idx].meta.artist, NULL);
+        }
     }
+
+    save_state(g_current_loaded_dir, index, g_volume, g_repeat_single, g_is_shuffle);
 
     return true;
 }
@@ -413,6 +519,9 @@ static bool load_directory(const wchar_t* dir_path) {
     while (dlen > 0 && (clean_dir[dlen - 1] == L'\\' || clean_dir[dlen - 1] == L'/')) {
         clean_dir[--dlen] = L'\0';
     }
+
+    wcsncpy(g_current_loaded_dir, clean_dir, MAX_PATH_LEN - 1);
+    g_current_loaded_dir[MAX_PATH_LEN - 1] = L'\0';
 
     wchar_t search_pattern[MAX_PATH_LEN];
     _snwprintf(search_pattern, MAX_PATH_LEN, L"%s\\*.*", clean_dir);
@@ -540,7 +649,26 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (initial_dir[0] == L'\0') {
+    int start_track = 0;
+    wchar_t saved_dir[MAX_PATH_LEN] = {0};
+    int saved_track = 0;
+    float saved_vol = 0.15f;
+    bool saved_repeat = false;
+    bool saved_shuffle = false;
+    bool has_saved_state = load_state(saved_dir, &saved_track, &saved_vol, &saved_repeat, &saved_shuffle);
+
+    if (initial_dir[0] != L'\0') {
+        start_track = 0;
+    } else if (has_saved_state && GetFileAttributesW(saved_dir) != INVALID_FILE_ATTRIBUTES) {
+        wcsncpy(initial_dir, saved_dir, MAX_PATH_LEN - 1);
+        initial_dir[MAX_PATH_LEN - 1] = L'\0';
+        start_track = saved_track;
+        g_volume = saved_vol;
+        g_repeat_single = saved_repeat;
+        if (saved_shuffle) {
+            g_is_shuffle = true;
+        }
+    } else {
         wprintf(L"\n");
         wprintf(L"=================================================================================\n");
         wprintf(L"                            Welcome to WaveDar Player                            \n");
@@ -571,11 +699,19 @@ int main(int argc, char** argv) {
     }
 
     if (!load_directory(initial_dir)) {
-        wprintf(L"\n[Error] No audio files (.mp3, .wav, .flac) found in target path.\n");
+        wprintf(L"\n[Error] No audio files (.mp3, .wav, .flac, .ogg, .m4a) found in target path.\n");
         wprintf(L"Press any key to exit...\n");
         _getch();
         if (w_argv) LocalFree(w_argv);
         return 1;
+    }
+
+    if (g_is_shuffle) {
+        apply_shuffle(true);
+    }
+
+    if (start_track < 0 || start_track >= g_playlist_count) {
+        start_track = 0;
     }
 
     InitializeCriticalSection(&g_audio_cs);
@@ -587,10 +723,12 @@ int main(int argc, char** argv) {
     RegisterHotKey(NULL, 3, 0, VK_MEDIA_PREV_TRACK);
     RegisterHotKey(NULL, 4, 0, VK_MEDIA_STOP);
 
+    SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
+
     wprintf(L"\x1b[2J\x1b[H");
     draw_shortcuts_box();
 
-    play_track(0);
+    play_track(start_track);
 
     COORD status_coord = { 0, 5 };
     bool is_running = true;
@@ -638,6 +776,9 @@ int main(int argc, char** argv) {
                         ma_uint64 cur_pcm = 0, len_pcm = 0;
                         ma_decoder_get_cursor_in_pcm_frames(&g_decoder, &cur_pcm);
                         ma_decoder_get_length_in_pcm_frames(&g_decoder, &len_pcm);
+                        if (len_pcm == 0 && g_current_track_total_sec > 0) {
+                            len_pcm = (ma_uint64)g_current_track_total_sec * g_decoder.outputSampleRate;
+                        }
                         ma_uint64 seek_frames = (ma_uint64)g_decoder.outputSampleRate * 5;
                         ma_decoder_seek_to_pcm_frame(&g_decoder, cur_pcm + seek_frames < len_pcm ? cur_pcm + seek_frames : len_pcm);
                         LeaveCriticalSection(&g_audio_cs);
@@ -715,6 +856,7 @@ int main(int argc, char** argv) {
                 if (!cancelled && nlen > 0) {
                     if (load_directory(new_dir)) {
                         play_track(0);
+                        save_state(g_current_loaded_dir, 0, g_volume, g_repeat_single, g_is_shuffle);
                     } else {
                         SetConsoleCursorPosition(hOut, (COORD){0, 7});
                         wprintf(L"[Notice] No audio files found in directory.\x1b[2K");
@@ -741,6 +883,9 @@ int main(int argc, char** argv) {
                     ma_uint64 cur_pcm = 0, len_pcm = 0;
                     ma_decoder_get_cursor_in_pcm_frames(&g_decoder, &cur_pcm);
                     ma_decoder_get_length_in_pcm_frames(&g_decoder, &len_pcm);
+                    if (len_pcm == 0 && g_current_track_total_sec > 0) {
+                        len_pcm = (ma_uint64)g_current_track_total_sec * g_decoder.outputSampleRate;
+                    }
                     ma_uint64 seek_frames = (ma_uint64)g_decoder.outputSampleRate * 15;
                     ma_decoder_seek_to_pcm_frame(&g_decoder, cur_pcm + seek_frames < len_pcm ? cur_pcm + seek_frames : len_pcm);
                     LeaveCriticalSection(&g_audio_cs);
@@ -815,6 +960,8 @@ int main(int argc, char** argv) {
 
         Sleep(50);
     }
+
+    save_state(g_current_loaded_dir, g_current_index, g_volume, g_repeat_single, g_is_shuffle);
 
     discord_clear_presence();
     net_cover_cleanup();

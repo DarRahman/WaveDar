@@ -184,13 +184,20 @@ static DWORD WINAPI cover_worker_thread(LPVOID arg) {
     return 0;
 }
 
+bool net_cover_lookup(const wchar_t* title, const wchar_t* artist, char* out_url, char* out_album) {
+    if (!title || !artist || !out_url || !out_album) return false;
+    return cache_lookup(title, artist, out_url, out_album);
+}
+
 void net_cover_resolve_async(const wchar_t* title, const wchar_t* artist, cover_resolved_cb callback) {
-    if (!title || !callback) return;
+    if (!title || !artist) return;
 
     char cached_url[MAX_URL_LEN];
     char cached_album[MAX_ALBUM_LEN];
     if (cache_lookup(title, artist, cached_url, cached_album)) {
-        callback(title, cached_url, cached_album);
+        if (callback) {
+            callback(title, cached_url, cached_album);
+        }
         return;
     }
 

@@ -11,8 +11,8 @@ typedef void (*cover_resolved_cb)(const wchar_t* title, const char* cover_url, c
 
 void net_cover_init(void);
 void net_cover_cleanup(void);
+bool net_cover_lookup(const wchar_t* title, const wchar_t* artist, char* out_url, char* out_album);
 
-// Resolve cover art in a detached background thread without blocking audio playback.
 void net_cover_resolve_async(const wchar_t* title, const wchar_t* artist, cover_resolved_cb callback);
 
 #endif // NET_COVER_H
