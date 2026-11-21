@@ -16,9 +16,7 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include "../include/miniaudio.h"
 #include "metadata.h"
-#include "net_cover.h"
 
-#define DISCORD_CLIENT_ID "1572952110713012377"
 #define MAX_TRACKS 256
 #define MAX_PATH_LEN 512
 
@@ -47,15 +45,6 @@ static volatile bool g_is_shuffle = false;
 static volatile bool g_track_finished = false;
 static volatile bool g_loop_restarted = false;
 static volatile float g_volume = 0.15f;
-
-static bool g_discord_enabled = true;
-static HANDLE g_discord_pipe = INVALID_HANDLE_VALUE;
-static uint64_t g_discord_nonce = 1;
-static time_t g_last_discord_reconnect = 0;
-
-static char g_current_cover_url[MAX_URL_LEN] = "app_logo";
-static char g_current_album_name[MAX_ALBUM_LEN] = "WaveDar";
-static CRITICAL_SECTION g_cover_cs;
 
 static int g_current_track_total_sec = 0;
 static wchar_t g_current_loaded_dir[MAX_PATH_LEN] = {0};
@@ -186,17 +175,15 @@ static void data_callback(ma_device* pDevice, void* pOutput, const void* pInput,
 static int get_cjk_string_width(const wchar_t* str) {
     if (!str) return 0;
     int w = 0;
-    while (*str) {
-        wchar_t c = *str++;
-        if (c >= 0x1100 && (
-            (c <= 0x115F) || c == 0x2329 || c == 0x232A ||
-            (c >= 0x2E80 && c <= 0xA4CF && c != 0x303F) ||
-            (c >= 0xAC00 && c <= 0xD7A3) ||
-            (c >= 0xF900 && c <= 0xFAFF) ||
-            (c >= 0xFE10 && c <= 0xFE19) ||
-            (c >= 0xFE30 && c <= 0xFE6F) ||
-            (c >= 0xFF00 && c <= 0xFF60) ||
-            (c >= 0xFFE0 && c <= 0xFFE6))) {
+    for (size_t i = 0; str[i] != L'\0'; i++) {
+        wchar_t ch = str[i];
+        if ((ch >= 0x1100 && ch <= 0x11FF) ||
+            (ch >= 0x2E80 && ch <= 0x9FFF) ||
+            (ch >= 0xAC00 && ch <= 0xD7AF) ||
+            (ch >= 0xF900 && ch <= 0xFAFF) ||
+            (ch >= 0xFE30 && ch <= 0xFE4F) ||
+            (ch >= 0xFF00 && ch <= 0xFF60) ||
+            (ch >= 0xFFE0 && ch <= 0xFFE6)) {
             w += 2;
         } else {
             w += 1;
@@ -218,178 +205,6 @@ static void get_current_track_time(int* p_cur, int* p_tot) {
     }
     if (p_cur) *p_cur = cur_sec;
     if (p_tot) *p_tot = tot_sec;
-}
-
-static HANDLE discord_connect(void) {
-    if (!g_discord_enabled) return INVALID_HANDLE_VALUE;
-
-    for (int i = 0; i < 10; i++) {
-        wchar_t pipe_name[64];
-        _snwprintf(pipe_name, 64, L"\\\\.\\pipe\\discord-ipc-%d", i);
-        HANDLE h = CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
-        if (h != INVALID_HANDLE_VALUE) {
-            char json[256];
-            snprintf(json, sizeof(json), "{\"v\":1,\"client_id\":\"%s\"}", DISCORD_CLIENT_ID);
-            uint32_t op = 0; // HANDSHAKE
-            uint32_t len = (uint32_t)strlen(json);
-            DWORD written = 0;
-            WriteFile(h, &op, 4, &written, NULL);
-            WriteFile(h, &len, 4, &written, NULL);
-            WriteFile(h, json, len, &written, NULL);
-
-            uint32_t resp_op = 0, resp_len = 0;
-            DWORD read_bytes = 0;
-            if (ReadFile(h, &resp_op, 4, &read_bytes, NULL) &&
-                ReadFile(h, &resp_len, 4, &read_bytes, NULL)) {
-                char* resp_buf = (char*)malloc(resp_len + 1);
-                if (resp_buf) {
-                    ReadFile(h, resp_buf, resp_len, &read_bytes, NULL);
-                    free(resp_buf);
-                }
-            }
-            return h;
-        }
-    }
-    return INVALID_HANDLE_VALUE;
-}
-
-static void discord_escape_json(const char* src, char* dst, size_t dst_len) {
-    size_t di = 0;
-    for (size_t si = 0; src[si] != '\0' && di + 2 < dst_len; si++) {
-        unsigned char c = (unsigned char)src[si];
-        if (c == '\"') {
-            dst[di++] = '\\'; dst[di++] = '\"';
-        } else if (c == '\\') {
-            dst[di++] = '\\'; dst[di++] = '\\';
-        } else if (c == '\n') {
-            dst[di++] = '\\'; dst[di++] = 'n';
-        } else if (c == '\r') {
-            dst[di++] = '\\'; dst[di++] = 'r';
-        } else if (c == '\t') {
-            dst[di++] = '\\'; dst[di++] = 't';
-        } else if (c >= 0x20) {
-            dst[di++] = c;
-        }
-    }
-    dst[di] = '\0';
-}
-
-static void discord_update_presence(const TrackInfo* track, int cur_sec, int tot_sec, bool is_paused) {
-    if (!g_discord_enabled) return;
-
-    time_t now = time(NULL);
-    if (g_discord_pipe == INVALID_HANDLE_VALUE) {
-        if (now - g_last_discord_reconnect < 5) return;
-        g_last_discord_reconnect = now;
-        g_discord_pipe = discord_connect();
-        if (g_discord_pipe == INVALID_HANDLE_VALUE) return;
-    }
-
-    char u_song[MAX_TITLE_LEN * 3];
-    char u_artist[MAX_ARTIST_LEN * 3];
-    WideCharToMultiByte(CP_UTF8, 0, track->meta.title, -1, u_song, sizeof(u_song), NULL, NULL);
-    WideCharToMultiByte(CP_UTF8, 0, track->meta.artist, -1, u_artist, sizeof(u_artist), NULL, NULL);
-
-    char esc_song[MAX_TITLE_LEN * 3];
-    char esc_artist[MAX_ARTIST_LEN * 3];
-    discord_escape_json(u_song, esc_song, sizeof(esc_song));
-    discord_escape_json(u_artist, esc_artist, sizeof(esc_artist));
-
-    char cover_url[MAX_URL_LEN];
-    char album_name[MAX_ALBUM_LEN];
-    EnterCriticalSection(&g_cover_cs);
-    strncpy(cover_url, g_current_cover_url, sizeof(cover_url) - 1);
-    cover_url[sizeof(cover_url) - 1] = '\0';
-    strncpy(album_name, g_current_album_name, sizeof(album_name) - 1);
-    album_name[sizeof(album_name) - 1] = '\0';
-    LeaveCriticalSection(&g_cover_cs);
-
-    char esc_album[MAX_ALBUM_LEN * 3];
-    discord_escape_json(album_name, esc_album, sizeof(esc_album));
-
-    char payload[4096];
-    DWORD pid = GetCurrentProcessId();
-
-    long long start_ts = (long long)(now - cur_sec);
-    long long end_ts = (long long)(start_ts + tot_sec);
-
-    if (is_paused) {
-        snprintf(payload, sizeof(payload),
-            "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":%lu,\"activity\":{"
-            "\"type\":2,"
-            "\"status_display_type\":2,"
-            "\"details\":\"%s\","
-            "\"state\":\"%s\","
-            "\"assets\":{"
-            "\"large_image\":\"%s\","
-            "\"large_text\":\"%s\","
-            "\"small_image\":\"app_logo\","
-            "\"small_text\":\"WaveDar (Paused)\""
-            "}"
-            "}},\"nonce\":\"%llu\"}",
-            (unsigned long)pid, esc_song, esc_artist, cover_url, esc_album, (unsigned long long)g_discord_nonce++);
-    } else {
-        snprintf(payload, sizeof(payload),
-            "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":%lu,\"activity\":{"
-            "\"type\":2,"
-            "\"status_display_type\":2,"
-            "\"details\":\"%s\","
-            "\"state\":\"%s\","
-            "\"timestamps\":{\"start\":%lld,\"end\":%lld},"
-            "\"assets\":{"
-            "\"large_image\":\"%s\","
-            "\"large_text\":\"%s\","
-            "\"small_image\":\"app_logo\","
-            "\"small_text\":\"WaveDar\""
-            "}"
-            "}},\"nonce\":\"%llu\"}",
-            (unsigned long)pid, esc_song, esc_artist, start_ts, end_ts, cover_url, esc_album, (unsigned long long)g_discord_nonce++);
-    }
-
-    uint32_t op = 1; // FRAME
-    uint32_t len = (uint32_t)strlen(payload);
-    DWORD written = 0;
-    if (!WriteFile(g_discord_pipe, &op, 4, &written, NULL) ||
-        !WriteFile(g_discord_pipe, &len, 4, &written, NULL) ||
-        !WriteFile(g_discord_pipe, payload, len, &written, NULL)) {
-        CloseHandle(g_discord_pipe);
-        g_discord_pipe = INVALID_HANDLE_VALUE;
-    }
-}
-
-static void discord_clear_presence(void) {
-    if (g_discord_pipe != INVALID_HANDLE_VALUE) {
-        char payload[256];
-        DWORD pid = GetCurrentProcessId();
-        snprintf(payload, sizeof(payload),
-            "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":%lu,\"activity\":null},\"nonce\":\"%llu\"}",
-            (unsigned long)pid, (unsigned long long)g_discord_nonce++);
-        uint32_t op = 1;
-        uint32_t len = (uint32_t)strlen(payload);
-        DWORD written = 0;
-        WriteFile(g_discord_pipe, &op, 4, &written, NULL);
-        WriteFile(g_discord_pipe, &len, 4, &written, NULL);
-        WriteFile(g_discord_pipe, payload, len, &written, NULL);
-        CloseHandle(g_discord_pipe);
-        g_discord_pipe = INVALID_HANDLE_VALUE;
-    }
-}
-
-static void on_cover_resolved(const wchar_t* title, const char* cover_url, const char* album_name) {
-    if (!title || !cover_url) return;
-
-    if (_wcsicmp(g_playlist[g_current_index].meta.title, title) == 0) {
-        EnterCriticalSection(&g_cover_cs);
-        strncpy(g_current_cover_url, cover_url, sizeof(g_current_cover_url) - 1);
-        g_current_cover_url[sizeof(g_current_cover_url) - 1] = '\0';
-        strncpy(g_current_album_name, album_name, sizeof(g_current_album_name) - 1);
-        g_current_album_name[sizeof(g_current_album_name) - 1] = '\0';
-        LeaveCriticalSection(&g_cover_cs);
-
-        int cur = 0, tot = 0;
-        get_current_track_time(&cur, &tot);
-        discord_update_presence(&g_playlist[g_current_index], cur, tot, g_is_paused);
-    }
 }
 
 static bool play_track(int index) {
@@ -472,34 +287,6 @@ static bool play_track(int index) {
                 }
                 stb_vorbis_close(v);
             }
-        }
-    }
-
-    EnterCriticalSection(&g_cover_cs);
-    if (!net_cover_lookup(g_playlist[index].meta.title, g_playlist[index].meta.artist, g_current_cover_url, g_current_album_name)) {
-        strncpy(g_current_cover_url, "app_logo", sizeof(g_current_cover_url) - 1);
-        g_current_cover_url[sizeof(g_current_cover_url) - 1] = '\0';
-        strncpy(g_current_album_name, "WaveDar", sizeof(g_current_album_name) - 1);
-        g_current_album_name[sizeof(g_current_album_name) - 1] = '\0';
-    }
-    LeaveCriticalSection(&g_cover_cs);
-
-    int cur = 0, tot = 0;
-    get_current_track_time(&cur, &tot);
-    discord_update_presence(&g_playlist[index], cur, tot, false);
-
-    if (g_discord_enabled) {
-        net_cover_resolve_async(g_playlist[index].meta.title, g_playlist[index].meta.artist, on_cover_resolved);
-
-        if (g_playlist_count > 1) {
-            int next_track_idx = 0;
-            if (g_is_shuffle) {
-                int next_shuf = (g_shuffle_index + 1) % g_playlist_count;
-                next_track_idx = g_shuffle_order[next_shuf];
-            } else {
-                next_track_idx = (index + 1) % g_playlist_count;
-            }
-            net_cover_resolve_async(g_playlist[next_track_idx].meta.title, g_playlist[next_track_idx].meta.artist, NULL);
         }
     }
 
@@ -623,9 +410,6 @@ int main(int argc, char** argv) {
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
     HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
 
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
-
     DWORD mode = 0;
     GetConsoleMode(hOut, &mode);
     SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
@@ -640,9 +424,7 @@ int main(int argc, char** argv) {
     wchar_t initial_dir[MAX_PATH_LEN] = {0};
     if (w_argv) {
         for (int i = 1; i < w_argc; i++) {
-            if (_wcsicmp(w_argv[i], L"--no-discord") == 0) {
-                g_discord_enabled = false;
-            } else if (initial_dir[0] == L'\0') {
+            if (initial_dir[0] == L'\0') {
                 wcsncpy(initial_dir, w_argv[i], MAX_PATH_LEN - 1);
                 clean_quotes_w(initial_dir);
             }
@@ -715,8 +497,6 @@ int main(int argc, char** argv) {
     }
 
     InitializeCriticalSection(&g_audio_cs);
-    InitializeCriticalSection(&g_cover_cs);
-    net_cover_init();
 
     RegisterHotKey(NULL, 1, 0, VK_MEDIA_PLAY_PAUSE);
     RegisterHotKey(NULL, 2, 0, VK_MEDIA_NEXT_TRACK);
@@ -741,8 +521,6 @@ int main(int argc, char** argv) {
                     if (g_device_init) {
                         if (g_is_paused) { ma_device_start(&g_device); g_is_paused = false; }
                         else { ma_device_stop(&g_device); g_is_paused = true; }
-                        int cur = 0, tot = 0; get_current_track_time(&cur, &tot);
-                        discord_update_presence(&g_playlist[g_current_index], cur, tot, g_is_paused);
                     }
                 } else if (msg.wParam == 2) {
                     next_track();
@@ -766,9 +544,6 @@ int main(int argc, char** argv) {
                         ma_uint64 seek_frames = (ma_uint64)g_decoder.outputSampleRate * 5;
                         ma_decoder_seek_to_pcm_frame(&g_decoder, cur_pcm > seek_frames ? cur_pcm - seek_frames : 0);
                         LeaveCriticalSection(&g_audio_cs);
-
-                        int cur = 0, tot = 0; get_current_track_time(&cur, &tot);
-                        discord_update_presence(&g_playlist[g_current_index], cur, tot, g_is_paused);
                     }
                 } else if (arrow == 77) {
                     if (g_decoder_init) {
@@ -782,23 +557,20 @@ int main(int argc, char** argv) {
                         ma_uint64 seek_frames = (ma_uint64)g_decoder.outputSampleRate * 5;
                         ma_decoder_seek_to_pcm_frame(&g_decoder, cur_pcm + seek_frames < len_pcm ? cur_pcm + seek_frames : len_pcm);
                         LeaveCriticalSection(&g_audio_cs);
-
-                        int cur = 0, tot = 0; get_current_track_time(&cur, &tot);
-                        discord_update_presence(&g_playlist[g_current_index], cur, tot, g_is_paused);
                     }
                 } else if (arrow == 72) {
                     g_volume = (g_volume + 0.05f > 1.0f) ? 1.0f : g_volume + 0.05f;
                     if (g_device_init) ma_device_set_master_volume(&g_device, g_volume);
+                    save_state(g_current_loaded_dir, g_current_index, g_volume, g_repeat_single, g_is_shuffle);
                 } else if (arrow == 80) {
                     g_volume = (g_volume - 0.05f < 0.0f) ? 0.0f : g_volume - 0.05f;
                     if (g_device_init) ma_device_set_master_volume(&g_device, g_volume);
+                    save_state(g_current_loaded_dir, g_current_index, g_volume, g_repeat_single, g_is_shuffle);
                 }
             } else if (ch == ' ') {
                 if (g_device_init) {
                     if (g_is_paused) { ma_device_start(&g_device); g_is_paused = false; }
                     else { ma_device_stop(&g_device); g_is_paused = true; }
-                    int cur = 0, tot = 0; get_current_track_time(&cur, &tot);
-                    discord_update_presence(&g_playlist[g_current_index], cur, tot, g_is_paused);
                 }
             } else if (ch == 'n' || ch == 'N') {
                 next_track();
@@ -807,13 +579,17 @@ int main(int argc, char** argv) {
             } else if (ch == '+' || ch == '=') {
                 g_volume = (g_volume + 0.05f > 1.0f) ? 1.0f : g_volume + 0.05f;
                 if (g_device_init) ma_device_set_master_volume(&g_device, g_volume);
+                save_state(g_current_loaded_dir, g_current_index, g_volume, g_repeat_single, g_is_shuffle);
             } else if (ch == '-' || ch == '_') {
                 g_volume = (g_volume - 0.05f < 0.0f) ? 0.0f : g_volume - 0.05f;
                 if (g_device_init) ma_device_set_master_volume(&g_device, g_volume);
+                save_state(g_current_loaded_dir, g_current_index, g_volume, g_repeat_single, g_is_shuffle);
             } else if (ch == 'r' || ch == 'R') {
                 g_repeat_single = !g_repeat_single;
+                save_state(g_current_loaded_dir, g_current_index, g_volume, g_repeat_single, g_is_shuffle);
             } else if (ch == 's' || ch == 'S') {
                 apply_shuffle(!g_is_shuffle);
+                save_state(g_current_loaded_dir, g_current_index, g_volume, g_repeat_single, g_is_shuffle);
             } else if (ch == 'o' || ch == 'O') {
                 COORD prompt_coord = { 0, 7 };
                 SetConsoleCursorPosition(hOut, prompt_coord);
@@ -873,9 +649,6 @@ int main(int argc, char** argv) {
                     ma_uint64 seek_frames = (ma_uint64)g_decoder.outputSampleRate * 15;
                     ma_decoder_seek_to_pcm_frame(&g_decoder, cur_pcm > seek_frames ? cur_pcm - seek_frames : 0);
                     LeaveCriticalSection(&g_audio_cs);
-
-                    int cur = 0, tot = 0; get_current_track_time(&cur, &tot);
-                    discord_update_presence(&g_playlist[g_current_index], cur, tot, g_is_paused);
                 }
             } else if (ch == ']' || ch == '}') {
                 if (g_decoder_init) {
@@ -889,9 +662,6 @@ int main(int argc, char** argv) {
                     ma_uint64 seek_frames = (ma_uint64)g_decoder.outputSampleRate * 15;
                     ma_decoder_seek_to_pcm_frame(&g_decoder, cur_pcm + seek_frames < len_pcm ? cur_pcm + seek_frames : len_pcm);
                     LeaveCriticalSection(&g_audio_cs);
-
-                    int cur = 0, tot = 0; get_current_track_time(&cur, &tot);
-                    discord_update_presence(&g_playlist[g_current_index], cur, tot, g_is_paused);
                 }
             } else if (ch == 'q' || ch == 'Q') {
                 is_running = false;
@@ -905,17 +675,6 @@ int main(int argc, char** argv) {
 
         int cur_sec = 0, tot_sec = 0;
         get_current_track_time(&cur_sec, &tot_sec);
-
-        if (g_loop_restarted) {
-            g_loop_restarted = false;
-            discord_update_presence(&g_playlist[g_current_index], cur_sec, tot_sec, false);
-        }
-
-        static int discord_tick = 0;
-        discord_tick++;
-        if (discord_tick % 150 == 0) {
-            discord_update_presence(&g_playlist[g_current_index], cur_sec, tot_sec, g_is_paused);
-        }
 
         SetConsoleCursorPosition(hOut, status_coord);
 
@@ -963,9 +722,6 @@ int main(int argc, char** argv) {
 
     save_state(g_current_loaded_dir, g_current_index, g_volume, g_repeat_single, g_is_shuffle);
 
-    discord_clear_presence();
-    net_cover_cleanup();
-    DeleteCriticalSection(&g_cover_cs);
     DeleteCriticalSection(&g_audio_cs);
 
     if (g_device_init) {

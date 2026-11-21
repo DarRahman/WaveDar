@@ -8,7 +8,7 @@ echo [1/2] Compiling Windows resource...
 zig rc assets\resource.rc assets\resource.res
 
 echo [2/2] Compiling WaveDar (Native C99 + miniaudio)...
-zig cc -O3 src\main.c src\metadata.c src\net_cover.c assets\resource.res -o wavedar.exe -luser32 -lole32 -ladvapi32 -lshell32 -lwinhttp
+zig cc -O3 src\main.c src\metadata.c assets\resource.res -o wavedar.exe -luser32 -lole32 -ladvapi32 -lshell32
 
 if %ERRORLEVEL% EQU 0 (
     echo.
