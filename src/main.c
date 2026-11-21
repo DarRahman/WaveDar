@@ -514,6 +514,9 @@ int main(int argc, char** argv) {
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
     HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
 
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+
     DWORD mode = 0;
     GetConsoleMode(hOut, &mode);
     SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
@@ -789,7 +792,9 @@ int main(int argc, char** argv) {
         int padding_needed = 52 - visual_width;
         if (padding_needed < 0) padding_needed = 0;
 
-        wprintf(L"[%s]  [%02d:%02d/%02d:%02d]  [%2.0f%%]  [%s]  #%d/%d: %s%*s\r",
+        wchar_t line_buf[512];
+        int line_len = _snwprintf(line_buf, sizeof(line_buf) / sizeof(wchar_t),
+            L"[%s]  [%02d:%02d/%02d:%02d]  [%2.0f%%]  [%s]  #%d/%d: %s%*s\r",
             g_is_paused ? L"PAUSE" : L"PLAY ",
             cur_sec / 60, cur_sec % 60,
             tot_sec / 60, tot_sec % 60,
@@ -798,6 +803,15 @@ int main(int argc, char** argv) {
             g_current_index + 1, g_playlist_count,
             clipped_title,
             padding_needed, L"");
+
+        DWORD written = 0;
+        if (!WriteConsoleW(hOut, line_buf, (DWORD)line_len, &written, NULL)) {
+            char u8_line[1024];
+            int u8_len = WideCharToMultiByte(CP_UTF8, 0, line_buf, line_len, u8_line, sizeof(u8_line) - 1, NULL, NULL);
+            if (u8_len > 0) {
+                WriteFile(hOut, u8_line, (DWORD)u8_len, &written, NULL);
+            }
+        }
 
         Sleep(50);
     }

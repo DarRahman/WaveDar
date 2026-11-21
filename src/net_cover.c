@@ -67,18 +67,26 @@ static void cache_insert(const wchar_t* title, const wchar_t* artist, const char
     LeaveCriticalSection(&g_cache_cs);
 }
 
-static void url_encode_w(const wchar_t* src, wchar_t* dst, size_t dst_max) {
+static void url_encode_utf8(const wchar_t* src, wchar_t* dst, size_t dst_max) {
+    char utf8[1024];
+    int utf8_len = WideCharToMultiByte(CP_UTF8, 0, src, -1, utf8, sizeof(utf8), NULL, NULL);
+    if (utf8_len <= 0) {
+        dst[0] = L'\0';
+        return;
+    }
+
     size_t di = 0;
-    for (size_t si = 0; src[si] != L'\0' && di + 4 < dst_max; si++) {
-        wchar_t ch = src[si];
-        if (iswalnum(ch) || ch == L'-' || ch == L'_' || ch == L'.' || ch == L'~') {
-            dst[di++] = ch;
-        } else if (ch == L' ') {
+    for (int si = 0; si < utf8_len - 1 && di + 4 < dst_max; si++) {
+        unsigned char c = (unsigned char)utf8[si];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            dst[di++] = (wchar_t)c;
+        } else if (c == ' ') {
             dst[di++] = L'+';
         } else {
-            int high = (ch >> 4) & 0x0F;
-            int low = ch & 0x0F;
             dst[di++] = L'%';
+            int high = (c >> 4) & 0x0F;
+            int low = c & 0x0F;
             dst[di++] = (wchar_t)(high < 10 ? L'0' + high : L'A' + (high - 10));
             dst[di++] = (wchar_t)(low < 10 ? L'0' + low : L'A' + (low - 10));
         }
@@ -97,10 +105,10 @@ static DWORD WINAPI cover_worker_thread(LPVOID arg) {
     _snwprintf(combined_query, 512, L"%s %s", p->artist, p->title);
 
     wchar_t encoded_query[1024];
-    url_encode_w(combined_query, encoded_query, 1024);
+    url_encode_utf8(combined_query, encoded_query, 1024);
 
     wchar_t request_path[2048];
-    _snwprintf(request_path, 2048, L"/search?term=%s&media=music&entity=song&limit=1", encoded_query);
+    _snwprintf(request_path, 2048, L"/search?term=%s&media=music&limit=1", encoded_query);
 
     HINTERNET hSession = WinHttpOpen(L"WaveDar/1.0",
                                      WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
